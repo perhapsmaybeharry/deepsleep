@@ -1,0 +1,140 @@
+#!/bin/bash
+
+# deepsleep v2.0
+# 29, 30 Nov 2016
+# Written by Harry Wang
+# Licensed under GNU GPLv2
+
+# ----- INSERT CUSTOM FUNCTIONS HERE TO BE PERFORMED BEFORE SLEEP ----- #
+function beforesleep {
+
+	# replace this line of code with whatever you want to perform before sleep
+	echo -n
+
+}
+
+# ----- INSERT CUSTOM FUNCTIONS HERE TO BE PERFORMED AFTER AWAKEN ----- #
+function afterawaken {
+
+	# replace this line of code with whatever you want to perform after awaken
+	echo -n
+
+}
+
+cpucount=0
+hddcount=0
+disklist=""
+lockfile=/tmp/deepsleep
+
+sudo taskset -cp 0 $$ &> /dev/null
+sudo taskset -cp 0 $PPID &> /dev/null
+
+function init {
+
+	echo "You may be prompted for your password."
+	sudo echo
+	echo "DEEPSLEEP INIT"
+	cpucount=$(echo "$(lscpu | grep "CPU(s)\:" | grep -v "-" | rev | cut -f1 -d' ' | rev)-1" | bc)
+	cpucount="$(echo "$(lscpu | grep "CPU(s)\:" | grep -v "NUMA\|-" | rev | cut -f1 -d' ' | rev)-1" | bc)"
+	disklist=$(lsblk -lS | grep -i sata | cut -f1 -d' ' | xargs)
+	echo "detected CPUs: `echo $cpucount+1 | bc`"
+	echo "detected HDDs: $(lsblk -lS | grep -ic sata)"
+	echo
+
+}
+
+function sleep {
+
+	echo "DEEPSLEEP SLEEP"
+
+	if ! beforesleep; then echo -e "custom functions failed\n"; exit 11; fi
+
+	# sleep cpus
+	echo "ignoring core 0"
+	for cpu in `seq $cpucount | tr '\n' ' '`; do
+		echo "sleeping core $cpu"
+		sudo bash -c "echo "0" > /sys/devices/system/cpu/cpu$cpu/online"
+	done
+
+	# sleep disks
+	for disk in $disklist; do
+		echo "sleeping disk $disk"
+		sudo hdparm -Y /dev/$disk 1> /dev/null
+	done
+
+	sudo touch $lockfile
+
+}
+
+function awaken {
+
+	echo "DEEPSLEEP AWAKEN"
+
+	# wake cpus
+	echo "ignoring core 0"
+	for cpu in `seq $cpucount | tr '\n' ' '`; do
+                echo "awakening core $cpu"
+		sudo bash -c "echo "1" > /sys/devices/system/cpu/cpu$cpu/online"
+        done
+
+	# wake disks
+	for disk in $disklist; do
+		echo "awakening disk $disk"
+		sudo dd if=/dev/$disk of=/dev/null bs=4M count=1 2>/dev/null
+	done
+
+	if ! afterawaken; then echo -e "custom functions failed\n"; exit 11; fi
+
+	sudo rm $lockfile
+
+}
+
+echo
+if [ $1 == "sleep" ]; then
+
+	# check for lock file
+	if [ -f $lockfile ]; then echo -e "already deepsleeping\n"; exit 0; fi
+
+	if [ "$(ps -a -o cmd= | grep -vc "ps\|grep\|$PPID\|$$")" -gt 2 ]; then
+		echo "deepsleep cannot sleep if there are active user processes"
+		ps -a | grep -v "ps\|grep\|$PPID\|$$"
+		echo
+		exit 1
+	elif [ $(who | grep -c pts) -gt 1 ]; then
+		echo "deepsleep cannot sleep if there are active user connections"
+		tty=$(tty | cut -f3-4 -d'/')
+		who | grep -v $tty
+		echo
+		exit 2
+	fi
+
+	init
+	sleep
+
+
+elif [ $1 == "wake" ]; then
+
+	# check for lock file
+	if [ ! -f $lockfile ]; then echo -e "already awake\n"; exit 0; fi
+	init
+	awaken
+
+elif [ $1 == "interactive" ]; then
+
+	init
+	sleep
+	echo -e "\npress return to awaken"
+	read
+	awaken
+
+elif [ $1 == "status" ]; then
+
+	if [ -f $lockfile ]; then echo -e "deepsleeping\n"; exit 3;
+	else echo -e "wide awake\n"; exit 4; fi
+
+else
+
+	echo "invalid option"
+
+fi
+echo
